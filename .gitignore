@@ -3,3 +3,5 @@ __pycache__/
 *.json.private
 export*.json
 .DS_Store
+.pytest_cache/
+.ruff_cache/
