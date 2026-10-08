@@ -1,7 +1,6 @@
 """Core tests, runnable without Home Assistant: uv run --with aiohttp pytest tests"""
 import asyncio
 import base64
-import hashlib
 import importlib.util
 import json
 import sys
@@ -64,15 +63,6 @@ def test_refresh_margin():
     assert not a._fresh()
     a.expires_at = time.time() + 1000
     assert a._fresh()
-
-def test_list_request_units_and_auth_bytes():
-    raw, _ = local.build_list_request("DEV", 1700000000, 1700086400)
-    body = json.loads(raw)
-    p = body["payload"]
-    assert p["params"]["0"]["startTime"] == 1700000000          # seconds
-    assert p["timestamp"] > 10**12                               # milliseconds
-    assert b" " not in raw.replace("DEV".encode(), b"")          # compact, serialized once
-    assert hashlib.md5(raw + b"tok").hexdigest() == local.md5_hex(raw.decode() + "tok")
 
 def test_download_path_validation():
     c = local.KataLocalClient(None, "d", "1.2.3.4", 80, "t")

@@ -8,11 +8,10 @@ CONF_DEVICE_ID = "device_id"
 CONF_NOTIFY = "notify"
 CONF_LOCAL = "local"  # startup cache only; always re-verified before use
 
-# Cloud endpoints. Account host and refresh path are confirmed; the device and
-# command hosts/bodies must be verified against a captured App request (README).
+# Cloud endpoints and request bodies confirmed against App logs and live calls.
 ACCOUNT_BASE = "https://account.api.switchbot.net"
 DEVICE_BASE = "https://wonderlabs.ap.api.switchbot.net"
-COMMAND_BASE = "https://wonderlabs.ap.api.switchbot.net"  # unverified
+COMMAND_BASE = "https://wonderlabs.ap.api.switchbot.net"
 REFRESH_PATH = "/account/api/v1/user/token/refresh"
 SHADOW_PATH = "/device/device/v1/shadow/getByIDs"
 INVOKE_PATH = "/command/cmd/api/v1/func/invoke"
@@ -21,6 +20,10 @@ APP_VERSION = "10.3"
 PROP_LOCAL_INFO = 9230
 FUNC_OPEN_LOCAL = 1021
 FUNC_LIST_PHOTOS = 9217
+FUNC_DELETE_PHOTOS = 9218
+FUNC_LIST_PEOPLE = 9225
+FUNC_PERSON_PHOTOS = 9226
+FUNC_PERSON_STATS = 9227
 
 SCAN_INTERVAL = timedelta(minutes=5)
 THUMB_PROBE_INTERVAL = timedelta(minutes=15)

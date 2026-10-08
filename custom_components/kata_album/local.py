@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -16,30 +17,6 @@ from .errors import LocalError
 
 def md5_hex(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()  # noqa: S324 (device protocol)
-
-
-def build_list_request(device_id: str, start_s: int, end_s: int) -> tuple[bytes, str]:
-    """Return (raw body bytes, request id). Dates are seconds, timestamp is ms."""
-    body = {
-        "version": "1",
-        "code": 3,
-        "deviceID": device_id,
-        "payload": {
-            "functionID": FUNC_LIST_PHOTOS,
-            "requestID": str(uuid.uuid4()).upper(),
-            "timestamp": int(time.time() * 1000),
-            "params": {
-                "0": {
-                    "is_pic": True,
-                    "startTime": int(start_s),
-                    "endTime": int(end_s),
-                    "face_ids": [],
-                }
-            },
-        },
-    }
-    raw = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
-    return raw.encode("utf-8"), body["payload"]["requestID"]
 
 
 class KataLocalClient:
@@ -68,32 +45,39 @@ class KataLocalClient:
             raise self._wrap(err) from None
 
     async def list_photos(self, start_s: int, end_s: int) -> list[dict]:
-        raw, _ = build_list_request(self.device_id, start_s, end_s)
-        auth = hashlib.md5(raw + self.token.encode("utf-8")).hexdigest()  # noqa: S324
+        params = {"0": {"is_pic": True, "startTime": int(start_s), "endTime": int(end_s), "face_ids": []}}
+        return (await self.invoke(FUNC_LIST_PHOTOS, params)).get("list", [])
+
+    async def invoke(self, function_id: int, params: dict) -> dict:
+        """Signed local func_request. Dates in params are seconds; the timestamp is ms."""
+        body = {"version": "1", "code": 3, "deviceID": self.device_id,
+                "payload": {"functionID": function_id,
+                    "requestID": str(uuid.uuid4()).upper(), "timestamp": int(time.time() * 1000),
+                    "params": params}}
+        raw = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode()
+        auth = hashlib.md5(raw + self.token.encode()).hexdigest()  # noqa: S324
         try:
             async with self.session.post(
-                f"{self.base_url}/thing_model/func_request",
-                data=raw,
+                f"{self.base_url}/thing_model/func_request", data=raw,
                 headers={"Content-Type": "application/json", "Auth": auth},
-                timeout=aiohttp.ClientTimeout(total=20),
-                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=20), allow_redirects=False,
             ) as r:
                 if r.status != 200:
-                    raise LocalError(f"album HTTP {r.status}")
+                    raise LocalError(f"local HTTP {r.status}")
                 result = await r.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise self._wrap(err) from None
         try:
             params = result["payload"]["params"]
             if params["0"] != 0:
-                raise LocalError("album request rejected")
-            return list(params["1"].get("list", []))
+                raise LocalError("device request rejected")
+            return params.get("1") or {}
         except (KeyError, TypeError, AttributeError):
-            raise LocalError("unexpected album response") from None
+            raise LocalError("unexpected local response") from None
 
     async def open_image(self, path: str):
         """Return an open aiohttp response context for a validated /download path."""
-        if not path.startswith("/download/photo/") or ".." in path or "\\" in path:
+        if not re.fullmatch(r"/download/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.(?:jpg|png)", path):
             raise LocalError("path not allowed")
         try:
             resp = await self.session.get(

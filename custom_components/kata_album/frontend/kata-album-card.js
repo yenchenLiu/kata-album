@@ -1,4 +1,4 @@
-/* Kata Album card: read-only photo gallery. No external deps, no persistent image storage. */
+/* Kata Album card: photo and people gallery. No external deps, no persistent image storage. */
 const MAX_THUMBS = 4;
 const LIST_TTL_MS = 10 * 60 * 1000;
 
@@ -36,7 +36,15 @@ ha-card{overflow:hidden}
 .pill{font:inherit;cursor:pointer;color:var(--primary-text-color);background:var(--secondary-background-color);
   border:1px solid var(--divider-color);border-radius:999px;padding:6px 14px}
 .pill:hover{background:var(--divider-color)}
-.body{padding:0 16px 16px}
+.body{padding:0 16px 16px;max-height:var(--kata-body-height,70vh);overflow:auto}
+[hidden]{display:none!important}
+.pill[aria-pressed=true]{background:var(--primary-color);color:var(--text-primary-color,#fff)}
+.people-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px}
+.person{display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px;border-radius:12px;
+  border:1px solid var(--divider-color);background:var(--secondary-background-color);color:var(--primary-text-color);cursor:pointer}
+.person img,.avatar{width:64px;height:64px;border-radius:50%;object-fit:cover;background:var(--divider-color)}
+.person span{max-width:100%;overflow-wrap:anywhere}
+
 .day{margin-top:20px}
 .day:first-child{margin-top:4px}
 .dh{display:flex;align-items:baseline;gap:8px;margin:0 0 8px}
@@ -97,6 +105,7 @@ class KataAlbumCard extends HTMLElement {
     this._full = new Limiter(1);
     this._gen = 0;
     this._built = false;
+    this._mode = "album"; this._person = null; this._collapsed = false;
   }
   set hass(hass) {
     this._hass = hass;
@@ -133,13 +142,18 @@ class KataAlbumCard extends HTMLElement {
       <ha-card>
         <div class="bar">
           <div class="ttl"><h2></h2><p id="sub"></p></div>
-          <div class="ctl"><input type="date" id="date" aria-label="Jump to date">
+          <div class="ctl">
+            <button class="pill" id="album" aria-pressed="true">Album</button>
+            <button class="pill" id="people" aria-pressed="false">People</button>
+            <button class="pill" id="collapse" aria-expanded="true">Collapse</button>
+          </div>
+          <div class="ctl" id="dates"><input type="date" id="date" aria-label="Jump to date">
             <button class="pill" id="today">Today</button></div>
         </div>
-        <div class="body"><div id="list"></div><div class="msg" id="msg"></div><div id="sentinel"></div></div>
+        <div class="body" id="body"><button class="pill" id="back" hidden>← People</button><div id="list"></div><div class="msg" id="msg"></div><div id="sentinel"></div></div>
         <dialog id="dlg"><div class="lb" id="lb">
           <div class="top"><div class="cap"><b id="c1"></b><small id="c2"></small></div>
-            <button class="pill" id="orig">Original</button>
+            <button class="pill" id="orig">Original</button><button class="pill" id="delete">Delete</button>
             <button class="pill" id="close" aria-label="Close">✕</button></div>
           <button class="nav prev" id="prev" aria-label="Previous">‹</button>
           <button class="nav next" id="next" aria-label="Next">›</button>
@@ -147,6 +161,18 @@ class KataAlbumCard extends HTMLElement {
         </div></dialog>
       </ha-card>`;
     this.shadowRoot.querySelector("h2").textContent = this._config.title;
+    this.style.setProperty("--kata-body-height", `${Math.max(200, Number(this._config.max_height) || 640)}px`);
+    this.$("album").addEventListener("click", () => this._switchMode("album"));
+    this.$("people").addEventListener("click", () => this._switchMode("people"));
+    this.$("back").addEventListener("click", () => { this._person = null; this._loadPeople(); });
+    this.$("collapse").addEventListener("click", () => {
+      this._collapsed = !this._collapsed;
+      this.$("body").hidden = this._collapsed;
+      this.$("collapse").textContent = this._collapsed ? "Expand" : "Collapse";
+      this.$("collapse").setAttribute("aria-expanded", String(!this._collapsed));
+      if (this._collapsed) this._cancel(); else this._load();
+    });
+    this.$("delete").addEventListener("click", () => this._deletePhoto());
     const input = this.$("date");
     input.value = this._date; input.max = this._today();
     input.addEventListener("change", () => { this._date = input.value || this._today(); this._load(); });
@@ -155,7 +181,7 @@ class KataAlbumCard extends HTMLElement {
     this._sentinel._load = () => this._more();
     this._io = new IntersectionObserver((entries) => {
       for (const e of entries) if (e.isIntersecting) { this._io.unobserve(e.target); e.target._load?.(); }
-    }, { rootMargin: "400px" });
+    }, { root: this.$("body"), rootMargin: "400px" });
 
     const dlg = this.$("dlg");
     dlg.addEventListener("close", () => this._closeViewer());
@@ -179,17 +205,19 @@ class KataAlbumCard extends HTMLElement {
   }
 
   _cancel() {
+    this._gen++;
     this._ctl?.abort(); this._ctl = null;
+    this._viewCtl?.abort();
     this._io?.disconnect();
     for (const u of this._blobs) URL.revokeObjectURL(u);
     this._blobs.clear();
   }
-  async _fetch(url, signal) {
+  async _fetch(url, signal, options = {}) {
     const path = url.startsWith("/") ? url : `/${url}`;
     const res = this._hass.fetchWithAuth
-      ? await this._hass.fetchWithAuth(path, { signal, cache: "no-store" })
+      ? await this._hass.fetchWithAuth(path, { ...options, signal, cache: "no-store" })
       : await fetch(this._hass.hassUrl(path), {
-          headers: { Authorization: `Bearer ${this._hass.auth.data.access_token}` },
+          ...options, headers: { ...options.headers, Authorization: `Bearer ${this._hass.auth.data.access_token}` },
           cache: "no-store", signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res;
@@ -208,16 +236,24 @@ class KataAlbumCard extends HTMLElement {
   }
   _summary() {
     const days = new Set(this._items.map((i) => i.date)).size;
-    this.$("sub").textContent = this._items.length
+    this.$("sub").textContent = this._person
+      ? `${this._person.name || "Person"} · ${this._items.length} loaded${this._personTotal === null ? "" : ` / ${this._personTotal} total`}`
+      : this._items.length
       ? `${this._items.length} photos · ${days} day${days === 1 ? "" : "s"}${this._done ? "" : " loaded"}`
       : "";
   }
 
   /* ---------- loading ---------- */
   _load() {
+    if (this._collapsed) return;
+    if (this._mode === "people" && !this._person) { this._loadPeople(); return; }
+    this.$("back").hidden = !this._person;
+    this._cursor = null;
     this._cancel();
     this._gen++;
     this._ctl = new AbortController();
+    this._personTotal = null;
+    if (this._person?.group === "familiar") this._loadPersonStats(this._person, this._gen, this._ctl.signal);
     this.$("list").replaceChildren();
     this._items = []; this._rendered = 0; this._lastDate = null; this._grid = null;
     this._oldest = addDays(this._date, 1);
@@ -239,7 +275,7 @@ class KataAlbumCard extends HTMLElement {
       if (gen !== this._gen) return;
       this._renderPage();
       this._summary();
-      if (!this._items.length) this._setMsg(`No photos in the last ${this._config.max_days} days.`);
+      if (!this._items.length) this._setMsg(this._person ? "No photos for this person." : `No photos in the last ${this._config.max_days} days.`);
       else if (this._done && this._rendered >= this._items.length) this._setMsg("You've reached the end.");
       else this._setMsg("");
     } catch (e) {
@@ -253,6 +289,18 @@ class KataAlbumCard extends HTMLElement {
   }
 
   async _loadWindow(gen, signal) {
+    if (this._person) {
+      let url = `/api/kata_album/${this._config.entry_id}/people/${this._person.id}/photos`;
+      if (this._cursor !== null) url += `?cursor=${this._cursor}`;
+      const data = await (await this._fetch(url, signal)).json();
+      if (gen !== this._gen) return;
+      const ids = new Set(this._items.map(i => i.id));
+      const fresh = data.items.filter(i => !ids.has(i.id));
+      this._items.push(...fresh);
+      this._done = data.done || !fresh.length || data.next_cursor === this._cursor;
+      this._cursor = data.next_cursor;
+      return;
+    }
     const last = addDays(this._oldest, -1);
     const first = addDays(last, -(this._config.days_per_load - 1));
     const today = this._today();
@@ -317,6 +365,83 @@ class KataAlbumCard extends HTMLElement {
     });
   }
 
+  _switchMode(mode) {
+    this._mode = mode; this._person = null;
+    this.$("album").setAttribute("aria-pressed", String(mode === "album"));
+    this.$("people").setAttribute("aria-pressed", String(mode === "people"));
+    this.$("dates").hidden = mode === "people";
+    this.$("back").hidden = true;
+    this._load();
+  }
+
+  async _loadPeople() {
+    if (this._collapsed) return;
+    this._cancel(); const gen = ++this._gen;
+    this._ctl = new AbortController(); const signal = this._ctl.signal;
+    this.$("list").replaceChildren(); this.$("back").hidden = true;
+    this.$("sub").textContent = ""; this._setMsg("Loading people…");
+    try {
+      const data = await (await this._fetch(`/api/kata_album/${this._config.entry_id}/people`, signal)).json();
+      if (gen !== this._gen) return;
+      this.$("sub").textContent = `${data.items.length} people`;
+      for (const group of ["familiar", "stranger"]) {
+        const people = data.items.filter(p => p.group === group);
+        if (!people.length) continue;
+        const heading = document.createElement("h3"); heading.textContent = group === "familiar" ? "Familiar" : "Strangers";
+        const grid = document.createElement("div"); grid.className = "people-grid";
+        this.$("list").append(heading, grid);
+        people.forEach((person, idx) => {
+          const button = document.createElement("button"); button.className = "person";
+          const avatar = document.createElement("span"); avatar.className = "avatar";
+          const label = document.createElement("span"); label.textContent = person.name || `${group === "familiar" ? "Person" : "Stranger"} ${idx + 1}`;
+          button.append(avatar, label); grid.append(button);
+          button.addEventListener("click", () => { this._person = person; this._load(); });
+          if (person.avatar_url) {
+            button._load = async () => {
+              try {
+                const blob = await this._thumbs.run(async () => (await this._fetch(person.avatar_url, signal)).blob(), signal);
+                if (gen !== this._gen) return;
+                const url = URL.createObjectURL(blob); this._blobs.add(url);
+                const image = new Image(); image.alt = ""; image.src = url; avatar.replaceWith(image);
+              } catch (_) { /* Keep placeholder; no background retries. */ }
+            };
+            this._io.observe(button);
+          }
+        });
+      }
+      this._setMsg(data.items.length ? "" : "No people found.");
+    } catch (e) {
+      if (gen !== this._gen || e.name === "AbortError") return;
+      this._setMsg("People unavailable.", { err: true });
+      const retry = document.createElement("button"); retry.className = "pill"; retry.textContent = "Retry";
+      retry.onclick = () => this._loadPeople(); this.$("msg").append(retry);
+    }
+  }
+
+  async _loadPersonStats(person, gen, signal) {
+    try {
+      const data = await (await this._fetch(`/api/kata_album/${this._config.entry_id}/people/${person.id}/stats`, signal)).json();
+      if (gen !== this._gen || signal.aborted) return;
+      this._personTotal = Number.isFinite(data.total) ? data.total : null; this._summary();
+    } catch (_) { /* Stats failure must not prevent photo browsing. */ }
+  }
+
+  async _deletePhoto() {
+    const item = this._items[this._idx];
+    if (!item || this._deleting) return;
+    if (!window.confirm(`Permanently delete this photo from Kata Friend?\n${item.captured_at || ""}\nThis cannot be undone.`)) return;
+    this._deleting = true; this.$("delete").disabled = true;
+    try {
+      await this._fetch(`/api/kata_album/${this._config.entry_id}/photos`, this._ctl.signal,
+        { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: item.id, confirm: true }) });
+      this._listCache.clear(); this.$("dlg").close(); this._load();
+    } catch (e) {
+      this._listCache.clear();
+      this.$("dlg").close(); this._load();
+      window.alert("Deletion could not be confirmed. The list is being reloaded; check before retrying.");
+    } finally { this._deleting = false; this.$("delete").disabled = false; }
+  }
+
   /* ---------- viewer ---------- */
   _open(idx) {
     this.$("dlg").showModal();
@@ -362,4 +487,4 @@ class KataAlbumCard extends HTMLElement {
 }
 if (!customElements.get("kata-album-card")) customElements.define("kata-album-card", KataAlbumCard);
 window.customCards = window.customCards || [];
-window.customCards.push({ type: "kata-album-card", name: "Kata Album", description: "Read-only Kata Friend photo gallery" });
+window.customCards.push({ type: "kata-album-card", name: "Kata Album", description: "Kata Friend photos and people" });

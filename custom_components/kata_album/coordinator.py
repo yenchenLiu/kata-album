@@ -20,7 +20,8 @@ from homeassistant.util import dt as dt_util
 from .auth import KataAuth
 from .cloud import KataCloud
 from .const import (
-    CONF_ACCOUNT, CONF_DEVICE_ID, CONF_LOCAL, CONF_NOTIFY, DOMAIN,
+    CONF_ACCOUNT, CONF_DEVICE_ID, CONF_LOCAL, CONF_NOTIFY, DOMAIN, FUNC_DELETE_PHOTOS,
+    FUNC_LIST_PEOPLE, FUNC_PERSON_PHOTOS, FUNC_PERSON_STATS,
     FAILURES_BEFORE_RECOVERY, LIST_CACHE_SECONDS, MAX_THUMB_BYTES,
     RECOVERY_COOLDOWN, RECOVERY_POLL_SECONDS, SCAN_INTERVAL, STATE_AUTH_REQUIRED,
     STATE_EMPTY, STATE_ERROR, STATE_HEALTHY, STATE_RECOVERING,
@@ -31,6 +32,7 @@ from .local import KataLocalClient, limited_chunks
 
 _LOGGER = logging.getLogger(__name__)
 MAX_REGISTRY = 5000
+PERSON_PAGE_SIZE = 20
 
 
 _ID_RE = re.compile(r"^photo/[0-9A-Za-z_-]+$")
@@ -81,6 +83,7 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
         self._notified = False
         self.state = STATE_ERROR
         self.today_count = 0
+        self._people: dict[str, dict] = {}
         loc = entry.data.get(CONF_LOCAL)
         if loc:
             self._set_local(loc)
@@ -115,16 +118,9 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
         raw = await self.local.list_photos(start, end)
         items = []
         for it in raw:
-            paths = _photo_paths(it)
-            if not paths:
-                continue
-            ts = int(it.get("start_time") or 0) // 1000  # device sends milliseconds
-            pid = hashlib.sha256(f"{self._salt}{it['path']}".encode()).hexdigest()[:20]
-            self._photos.pop(pid, None)  # re-insert so recently listed ids stay newest
-            self._photos[pid] = {"thumb": paths[0], "preview": paths[1], "original": paths[2]}
-            items.append({"id": pid, "ts": ts})
-        while len(self._photos) > MAX_REGISTRY:
-            self._photos.pop(next(iter(self._photos)))
+            photo = self._register_photo(it)
+            if photo:
+                items.append(photo)
         items.sort(key=lambda i: i["ts"], reverse=True)  # newest first
         if len(self._list_cache) > 32:
             self._list_cache.clear()
@@ -138,6 +134,115 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
     def photo_path(self, photo_id: str, kind: str) -> str | None:
         p = self._photos.get(photo_id)
         return p[kind] if p else None
+
+    def _register_photo(self, item: dict) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        paths = _photo_paths(item)
+        if not paths or "id" not in item:
+            return None
+        try:
+            ts = int(item.get("start_time") or 0) // 1000  # device sends milliseconds
+        except (TypeError, ValueError):
+            return None
+        pid = hashlib.sha256(f"{self._salt}{item['path']}".encode()).hexdigest()[:20]
+        self._photos.pop(pid, None)  # re-insert so recently listed ids stay newest
+        self._photos[pid] = dict(thumb=paths[0], preview=paths[1], original=paths[2],
+                                 device_id=str(item["id"]), ts=ts)
+        while len(self._photos) > MAX_REGISTRY:
+            self._photos.pop(next(iter(self._photos)))
+        return {"id": pid, "ts": ts}
+
+    def has_person(self, person_id: str) -> bool:
+        return person_id in self._people
+
+    def person_avatar(self, person_id: str) -> str | None:
+        return self._people.get(person_id, {}).get("avatar")
+
+    @staticmethod
+    def _as_list(value, what: str) -> list:
+        value = [] if value is None else value
+        if not isinstance(value, list):
+            raise LocalError(f"unexpected {what} response")
+        return value
+
+    async def list_people(self) -> list[dict]:
+        async with self._lock:
+            if self.local is None:
+                await self._refresh_local_info()
+            data = await self.local.invoke(FUNC_LIST_PEOPLE, {"0": ["stranger", "familiar"]})
+            people = {}
+            for group in ("familiar", "stranger"):
+                for face in self._as_list(data.get(group), "people"):
+                    try:
+                        fid = str(face["face_id"])
+                        name = str(face.get("name") or "")
+                        thumb = face.get("thumb_path", "")
+                    except (KeyError, TypeError, AttributeError):
+                        continue  # skip a malformed entry, keep the rest
+                    pid = hashlib.sha256(f"{self._salt}:face:{fid}".encode()).hexdigest()[:20]
+                    avatar = None
+                    if isinstance(thumb, str) and re.fullmatch(r"(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+", thumb):
+                        avatar = f"/download/{thumb}_mini.jpg"
+                    people[pid] = {"id": pid, "device_id": face["face_id"], "group": group,
+                                   "name": name, "avatar": avatar}
+            self._people = people
+            return list(people.values())
+
+    async def person_photos(self, person_id: str, cursor: int) -> dict:
+        async with self._lock:
+            face = self._people.get(person_id)
+            if face is None or self.local is None:
+                raise LocalError("person is no longer registered")
+            data = await self.local.invoke(FUNC_PERSON_PHOTOS, {"0": {
+                "face_id": face["device_id"], "timestamp": cursor, "page_size": PERSON_PAGE_SIZE}})
+            raw = self._as_list(data.get("pic_list"), "person photos")
+            items = [photo for it in raw if (photo := self._register_photo(it))]
+            try:
+                nxt = int(raw[-1]["id"]) if raw else None
+            except (KeyError, TypeError, ValueError):
+                raise LocalError("unexpected pagination data") from None
+            return {"items": items, "next_cursor": nxt,
+                    "done": len(raw) < PERSON_PAGE_SIZE or nxt is None or nxt >= cursor}
+
+    async def person_stats(self, person_id: str) -> dict:
+        async with self._lock:
+            face = self._people.get(person_id)
+            if face is None or self.local is None:
+                raise LocalError("person is no longer registered")
+            if face["group"] != "familiar":
+                return {"total": None, "start": None}
+            data = await self.local.invoke(FUNC_PERSON_STATS, {"0": {"face_id": face["device_id"]}})
+            return {"total": data.get("total"), "start": data.get("start")}
+
+    async def delete_photo(self, photo_id: str) -> None:
+        """Delete one previously listed photo; success means the device no longer lists it."""
+        async with self._lock:
+            photo = self._photos.get(photo_id)
+            if photo is None or self.local is None:
+                raise LocalError("photo is no longer registered")
+            try:
+                await self.local.invoke(
+                    FUNC_DELETE_PHOTOS, {"0": {"is_pic": True, "list": [photo["device_id"]]}})
+                await self._verify_gone(photo)
+            finally:
+                # A timeout may follow a successful delete. Never reuse stale list data.
+                self._list_cache.clear()
+            self._photos.pop(photo_id, None)
+        try:
+            await self.async_request_refresh()
+        except (KataError, ConfigEntryAuthFailed):
+            # Deletion was acknowledged; a separate health failure cannot undo it.
+            _LOGGER.debug("Post-delete health refresh failed")
+
+    async def _verify_gone(self, photo: dict) -> None:
+        """Re-list the photo's own second; an acknowledged delete that left it behind is a failure."""
+        ts = photo.get("ts")
+        if not ts:
+            return  # no timestamp to query by; fall back to the device's acknowledgement
+        remaining = await self.local.list_photos(ts - 1, ts + 2)  # type: ignore[union-attr]
+        if any(isinstance(p, dict) and str(p.get("id")) == photo["device_id"] for p in remaining):
+            raise LocalError("photo still listed after delete")
 
     # ---- checks -----------------------------------------------------------
     async def _check_local(self) -> int:
