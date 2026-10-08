@@ -36,16 +36,17 @@ MAX_REGISTRY = 5000
 _ID_RE = re.compile(r"^photo/[0-9A-Za-z_-]+$")
 
 
-def _photo_paths(item: dict) -> tuple[str, str] | None:
-    """Build (thumbnail, original) download paths from a 9217 list item.
+def _photo_paths(item: dict) -> tuple[str, str, str] | None:
+    """Build (thumbnail, preview, original) download paths from a 9217 list item.
 
-    Confirmed from the App: /download/<path>_thumb.jpg, _mini.jpg, <path>.png.
+    Confirmed from the App: /download/<path>_thumb.jpg (375x210), _mini.jpg
+    (1600x1200), <path>.png (original).
     Only device-listed, strictly shaped paths are ever turned into URLs.
     """
     path = item.get("path")
     if not isinstance(path, str) or not _ID_RE.match(path):
         return None
-    return f"/download/{path}_thumb.jpg", f"/download/{path}.png"
+    return f"/download/{path}_thumb.jpg", f"/download/{path}_mini.jpg", f"/download/{path}.png"
 
 
 def day_bounds(day) -> tuple[int, int]:
@@ -120,7 +121,7 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
             ts = int(it.get("start_time") or 0) // 1000  # device sends milliseconds
             pid = hashlib.sha256(f"{self._salt}{it['path']}".encode()).hexdigest()[:20]
             self._photos.pop(pid, None)  # re-insert so recently listed ids stay newest
-            self._photos[pid] = {"thumb": paths[0], "original": paths[1]}
+            self._photos[pid] = {"thumb": paths[0], "preview": paths[1], "original": paths[2]}
             items.append({"id": pid, "ts": ts})
         while len(self._photos) > MAX_REGISTRY:
             self._photos.pop(next(iter(self._photos)))

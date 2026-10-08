@@ -9,7 +9,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, MAX_ORIGINAL_BYTES, MAX_THUMB_BYTES
+from .const import DOMAIN, MAX_ORIGINAL_BYTES, MAX_PREVIEW_BYTES, MAX_THUMB_BYTES
 from .errors import KataError
 from .local import limited_chunks
 
@@ -77,6 +77,7 @@ class PhotosView(HomeAssistantView):
                 "date": when.date().isoformat() if when else None,
                 "captured_at": when.isoformat() if when else None,
                 "thumbnail_url": f"{base}/{i['id']}/thumbnail",
+                "preview_url": f"{base}/{i['id']}/preview",
                 "original_url": f"{base}/{i['id']}/original",
             })
         return self.json(
@@ -95,12 +96,13 @@ class ImageView(HomeAssistantView):
 
     async def get(self, request: web.Request, entry_id: str, photo_id: str, kind: str):
         c = _coordinator(self.hass, request, entry_id)
-        if kind not in ("thumbnail", "original"):
+        key = {"thumbnail": "thumb", "preview": "preview", "original": "original"}.get(kind)
+        if key is None:
             raise web.HTTPNotFound()
-        path = c.photo_path(photo_id, "thumb" if kind == "thumbnail" else "original")
+        path = c.photo_path(photo_id, key)
         if not path or c.local is None:
             raise web.HTTPNotFound()
-        limit = MAX_THUMB_BYTES if kind == "thumbnail" else MAX_ORIGINAL_BYTES
+        limit = {"thumb": MAX_THUMB_BYTES, "preview": MAX_PREVIEW_BYTES, "original": MAX_ORIGINAL_BYTES}[key]
         try:
             upstream = await c.local.open_image(path)
         except KataError:

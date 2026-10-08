@@ -1,4 +1,4 @@
-/* Kata Album card v0.2: read-only date-grouped timeline, no external deps, no persistent image storage. */
+/* Kata Album card v0.3: read-only photo gallery. No external deps, no persistent image storage. */
 const MAX_THUMBS = 4;
 const LIST_TTL_MS = 10 * 60 * 1000;
 
@@ -7,7 +7,7 @@ class Limiter {
   run(task, signal) {
     return new Promise((resolve, reject) => {
       const start = () => {
-        if (signal.aborted) return reject(new DOMException("aborted", "AbortError"));
+        if (signal.aborted) { this._next(); return reject(new DOMException("aborted", "AbortError")); }
         this.active++;
         task().then(resolve, reject).finally(() => { this.active--; this._next(); });
       };
@@ -23,16 +23,78 @@ function addDays(iso, n) {
 }
 function daysBetween(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 86400000); }
 
+const STYLE = `
+:host{display:block}
+ha-card{overflow:hidden}
+.bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;
+  padding:16px 16px 12px}
+.ttl h2{margin:0;font-size:1.25rem;font-weight:600;letter-spacing:-.01em}
+.ttl p{margin:2px 0 0;font-size:.85rem;color:var(--secondary-text-color)}
+.ctl{display:flex;gap:8px;align-items:center}
+.ctl input[type=date]{font:inherit;color:var(--primary-text-color);background:var(--secondary-background-color);
+  border:1px solid var(--divider-color);border-radius:999px;padding:6px 12px}
+.pill{font:inherit;cursor:pointer;color:var(--primary-text-color);background:var(--secondary-background-color);
+  border:1px solid var(--divider-color);border-radius:999px;padding:6px 14px}
+.pill:hover{background:var(--divider-color)}
+.body{padding:0 16px 16px}
+.day{margin-top:20px}
+.day:first-child{margin-top:4px}
+.dh{display:flex;align-items:baseline;gap:8px;margin:0 0 8px}
+.dh h3{margin:0;font-size:1.05rem;font-weight:600}
+.dh span{font-size:.8rem;color:var(--secondary-text-color)}
+.grid{display:grid;gap:6px}
+.tile{position:relative;aspect-ratio:16/9;border:0;padding:0;cursor:pointer;overflow:hidden;
+  border-radius:10px;background:var(--secondary-background-color)}
+.tile.load::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(100deg,transparent 30%,rgba(127,127,127,.18) 50%,transparent 70%);
+  background-size:200% 100%;animation:sh 1.3s infinite}
+@keyframes sh{from{background-position:200% 0}to{background-position:-200% 0}}
+.tile img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .25s ease}
+.tile:hover img,.tile:focus-visible img{transform:scale(1.05)}
+.tile:focus-visible{outline:2px solid var(--primary-color);outline-offset:2px}
+.tile .t{position:absolute;left:6px;bottom:6px;font-size:.72rem;color:#fff;padding:2px 7px;
+  border-radius:999px;background:rgba(0,0,0,.55);opacity:0;transition:opacity .15s}
+.tile:hover .t,.tile:focus-visible .t{opacity:1}
+@media (hover:none){.tile .t{opacity:1}}
+.tile.bad{display:grid;place-items:center;color:var(--secondary-text-color)}
+.msg{padding:28px 16px;text-align:center;color:var(--secondary-text-color)}
+.msg.err{color:var(--error-color)}
+dialog{border:0;padding:0;margin:0;width:100vw;height:100vh;max-width:none;max-height:none;
+  background:rgba(8,8,10,.96);color:#fff}
+dialog::backdrop{background:#000}
+.lb{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+  touch-action:pan-y}
+.lb img{max-width:100%;max-height:100%;object-fit:contain;display:block;user-select:none}
+.lb img.ph{filter:blur(6px);transform:scale(1.02)}
+.top{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:12px;
+  padding:max(12px,env(safe-area-inset-top)) 16px 28px;
+  background:linear-gradient(rgba(0,0,0,.65),transparent);z-index:2}
+.top .cap{flex:1;min-width:0}
+.top .cap b{display:block;font-weight:600}
+.top .cap small{opacity:.75}
+.lb .pill{background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.25);color:#fff}
+.lb .pill:hover{background:rgba(255,255,255,.26)}
+.nav{position:absolute;top:50%;transform:translateY(-50%);z-index:2;width:48px;height:48px;border-radius:50%;
+  border:0;cursor:pointer;font-size:1.6rem;line-height:1;color:#fff;background:rgba(255,255,255,.14)}
+.nav:hover{background:rgba(255,255,255,.28)}
+.nav[disabled]{opacity:.25;cursor:default}
+.prev{left:12px}.next{right:12px}
+.spin{position:absolute;z-index:1;width:36px;height:36px;border-radius:50%;
+  border:3px solid rgba(255,255,255,.25);border-top-color:#fff;animation:rot .8s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+@media (max-width:600px){.nav{display:none}}
+`;
+
 class KataAlbumCard extends HTMLElement {
   setConfig(config) {
     if (!config.entry_id) throw new Error("entry_id is required");
-    this._config = { columns: 3, page_size: 50, days_per_load: 30, max_days: 365,
+    this._config = { page_size: 60, days_per_load: 7, max_days: 365, min_tile: 160,
       title: "Kata Album", ...config };
     this._config.days_per_load = Math.min(31, Math.max(1, this._config.days_per_load));
     this._listCache = new Map();
     this._blobs = new Set();
     this._thumbs = new Limiter(MAX_THUMBS);
-    this._originals = new Limiter(1);
+    this._full = new Limiter(1);
     this._gen = 0;
     this._built = false;
   }
@@ -44,56 +106,76 @@ class KataAlbumCard extends HTMLElement {
   disconnectedCallback() { this._cancel(); }
   connectedCallback() { if (this._built && !this._ctl) this._load(); }
 
-  _today() {
-    const tz = this._hass?.config?.time_zone;
-    return new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date());
-  }
+  /* ---------- helpers ---------- */
+  get _tz() { return this._hass?.config?.time_zone; }
+  _today() { return new Intl.DateTimeFormat("en-CA", { timeZone: this._tz }).format(new Date()); }
   _label(iso) {
     const today = this._today();
     if (iso === today) return "Today";
     if (iso === addDays(today, -1)) return "Yesterday";
-    const d = new Date(`${iso}T12:00:00Z`);
-    return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric",
-      year: iso.slice(0, 4) === today.slice(0, 4) ? undefined : "numeric", timeZone: "UTC" });
+    return new Date(`${iso}T12:00:00Z`).toLocaleDateString(undefined,
+      { weekday: "long", timeZone: "UTC" });
   }
+  _dateText(iso) {
+    return new Date(`${iso}T12:00:00Z`).toLocaleDateString(undefined,
+      { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+  }
+  _time(item) {
+    return item.captured_at ? new Date(item.captured_at).toLocaleTimeString(undefined,
+      { hour: "2-digit", minute: "2-digit", timeZone: this._tz }) : "";
+  }
+  $(id) { return this.shadowRoot.getElementById(id); }
+
+  /* ---------- structure ---------- */
   _build() {
     this.attachShadow({ mode: "open" });
-    this.shadowRoot.innerHTML = `
-      <style>
-        ha-card{padding:12px}
-        header{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-        h2{margin:0;font-size:1.1em}
-        h3{margin:16px 0 4px;font-size:.95em;color:var(--secondary-text-color)}
-        .grid{display:grid;gap:4px}
-        .cell{aspect-ratio:1;background:var(--secondary-background-color);overflow:hidden;cursor:pointer;border:0;padding:0}
-        .cell img{width:100%;height:100%;object-fit:cover;display:block}
-        .msg{padding:16px;text-align:center;color:var(--secondary-text-color)}
-        .err{color:var(--error-color)}
-        dialog{border:0;padding:0;max-width:96vw;max-height:96vh;background:#000}
-        dialog img{max-width:96vw;max-height:90vh;display:block}
-        #sentinel{height:1px}
-      </style>
+    this.shadowRoot.innerHTML = `<style>${STYLE}</style>
       <ha-card>
-        <header><h2></h2><span><input type="date"> <button id="today">Today</button></span></header>
-        <div class="msg" id="msg"></div>
-        <div id="list"></div>
-        <div id="sentinel"></div>
-        <dialog id="dlg"><img id="big" alt=""></dialog>
+        <div class="bar">
+          <div class="ttl"><h2></h2><p id="sub"></p></div>
+          <div class="ctl"><input type="date" id="date" aria-label="Jump to date">
+            <button class="pill" id="today">Today</button></div>
+        </div>
+        <div class="body"><div id="list"></div><div class="msg" id="msg"></div><div id="sentinel"></div></div>
+        <dialog id="dlg"><div class="lb" id="lb">
+          <div class="top"><div class="cap"><b id="c1"></b><small id="c2"></small></div>
+            <button class="pill" id="orig">Original</button>
+            <button class="pill" id="close" aria-label="Close">✕</button></div>
+          <button class="nav prev" id="prev" aria-label="Previous">‹</button>
+          <button class="nav next" id="next" aria-label="Next">›</button>
+          <div class="spin" id="spin" hidden></div><img id="big" alt="">
+        </div></dialog>
       </ha-card>`;
-    const r = this.shadowRoot;
-    r.querySelector("h2").textContent = this._config.title;
-    this._input = r.querySelector("input");
-    this._input.value = this._date;
-    this._input.max = this._today();
-    this._input.addEventListener("change", () => { this._date = this._input.value || this._today(); this._load(); });
-    r.getElementById("today").addEventListener("click", () => { this._date = this._today(); this._input.value = this._date; this._load(); });
-    r.getElementById("dlg").addEventListener("close", () => this._closeOriginal());
-    r.getElementById("dlg").addEventListener("click", () => r.getElementById("dlg").close());
-    this._sentinel = r.getElementById("sentinel");
+    this.shadowRoot.querySelector("h2").textContent = this._config.title;
+    const input = this.$("date");
+    input.value = this._date; input.max = this._today();
+    input.addEventListener("change", () => { this._date = input.value || this._today(); this._load(); });
+    this.$("today").addEventListener("click", () => { this._date = this._today(); input.value = this._date; this._load(); });
+    this._sentinel = this.$("sentinel");
     this._sentinel._load = () => this._more();
     this._io = new IntersectionObserver((entries) => {
       for (const e of entries) if (e.isIntersecting) { this._io.unobserve(e.target); e.target._load?.(); }
-    }, { rootMargin: "300px" });
+    }, { rootMargin: "400px" });
+
+    const dlg = this.$("dlg");
+    dlg.addEventListener("close", () => this._closeViewer());
+    this.$("close").addEventListener("click", () => dlg.close());
+    this.$("prev").addEventListener("click", () => this._step(-1));
+    this.$("next").addEventListener("click", () => this._step(1));
+    this.$("orig").addEventListener("click", () => this._show(this._idx, true));
+    this.$("lb").addEventListener("click", (e) => { if (e.target === this.$("lb")) dlg.close(); });
+    dlg.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") this._step(-1);
+      else if (e.key === "ArrowRight") this._step(1);
+    });
+    let x0 = null;
+    const lb = this.$("lb");
+    lb.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; }, { passive: true });
+    lb.addEventListener("touchend", (e) => {
+      if (x0 === null) return;
+      const dx = e.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 50) this._step(dx < 0 ? 1 : -1);
+    });
   }
 
   _cancel() {
@@ -112,23 +194,38 @@ class KataAlbumCard extends HTMLElement {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res;
   }
-  _setMsg(text, err = false) {
-    const m = this.shadowRoot.getElementById("msg");
-    m.textContent = text; m.className = "msg" + (err ? " err" : "");
+  _setMsg(text, { err = false, retry = false } = {}) {
+    const m = this.$("msg");
+    m.className = "msg" + (err ? " err" : "");
+    m.textContent = text;
+    if (retry) {
+      const b = document.createElement("button");
+      b.className = "pill"; b.textContent = "Retry";
+      b.addEventListener("click", () => { this._busy = false; this._more(); });
+      m.append(document.createElement("br"), b);
+    }
+    m.hidden = !text;
+  }
+  _summary() {
+    const days = new Set(this._items.map((i) => i.date)).size;
+    this.$("sub").textContent = this._items.length
+      ? `${this._items.length} photos · ${days} day${days === 1 ? "" : "s"}${this._done ? "" : " loaded"}`
+      : "";
   }
 
+  /* ---------- loading ---------- */
   _load() {
     this._cancel();
     this._gen++;
     this._ctl = new AbortController();
-    this.shadowRoot.getElementById("list").replaceChildren();
+    this.$("list").replaceChildren();
     this._items = []; this._rendered = 0; this._lastDate = null; this._grid = null;
-    this._oldest = addDays(this._date, 1);  // exclusive lower edge: nothing loaded yet
+    this._oldest = addDays(this._date, 1);
     this._done = false; this._busy = false;
+    this._summary();
     this._more();
   }
 
-  /** Render the next page; if the loaded items run out, fetch an older window first. */
   async _more() {
     if (this._busy) return;
     this._busy = true;
@@ -140,12 +237,14 @@ class KataAlbumCard extends HTMLElement {
         if (gen !== this._gen) return;
       }
       if (gen !== this._gen) return;
-      if (!this._items.length) this._setMsg(`No photos in the last ${this._config.max_days} days.`);
-      else this._setMsg("");
       this._renderPage();
+      this._summary();
+      if (!this._items.length) this._setMsg(`No photos in the last ${this._config.max_days} days.`);
+      else if (this._done && this._rendered >= this._items.length) this._setMsg("You've reached the end.");
+      else this._setMsg("");
     } catch (e) {
       if (e.name === "AbortError" || gen !== this._gen) return;
-      this._setMsg("Album unavailable. Check the Kata Album status entity.", true);
+      this._setMsg("Album unavailable. Check the Kata Album status entity.", { err: true, retry: true });
       return; // no automatic retry
     } finally { if (gen === this._gen) this._busy = false; }
     if (this._rendered < this._items.length || !this._done) {
@@ -171,58 +270,96 @@ class KataAlbumCard extends HTMLElement {
     if (daysBetween(first, today) >= this._config.max_days) this._done = true;
   }
 
+  /* ---------- gallery ---------- */
   _renderPage() {
-    const list = this.shadowRoot.getElementById("list");
+    const list = this.$("list");
     const gen = this._gen, signal = this._ctl.signal;
-    const next = this._items.slice(this._rendered, this._rendered + this._config.page_size);
+    const start = this._rendered;
+    const next = this._items.slice(start, start + this._config.page_size);
     this._rendered += next.length;
-    for (const item of next) {
+    next.forEach((item, k) => {
+      const idx = start + k;
       if (!this._grid || item.date !== this._lastDate) {
-        const h = document.createElement("h3");
-        h.textContent = item.date ? this._label(item.date) : "Unknown date";
-        this._grid = document.createElement("div");
-        this._grid.className = "grid";
-        this._grid.style.gridTemplateColumns = `repeat(${this._config.columns},1fr)`;
-        list.append(h, this._grid);
+        const sec = document.createElement("section"); sec.className = "day";
+        const h = document.createElement("div"); h.className = "dh";
+        const t = document.createElement("h3"); t.textContent = item.date ? this._label(item.date) : "Unknown date";
+        const s = document.createElement("span");
+        const n = this._items.filter((i) => i.date === item.date).length;
+        s.textContent = `${item.date ? this._dateText(item.date) + " · " : ""}${n} photo${n === 1 ? "" : "s"}`;
+        h.append(t, s);
+        this._grid = document.createElement("div"); this._grid.className = "grid";
+        this._grid.style.gridTemplateColumns = this._config.columns
+          ? `repeat(${this._config.columns},1fr)`
+          : `repeat(auto-fill,minmax(${this._config.min_tile}px,1fr))`;
+        sec.append(h, this._grid); list.append(sec);
         this._lastDate = item.date;
       }
-      const cell = document.createElement("button");
-      cell.className = "cell";
-      cell.title = item.captured_at || "";
-      cell._load = async () => {
+      const tile = document.createElement("button");
+      tile.className = "tile load";
+      tile.setAttribute("aria-label", `Open photo ${this._time(item)}`);
+      const stamp = document.createElement("span"); stamp.className = "t"; stamp.textContent = this._time(item);
+      tile.append(stamp);
+      tile._load = async () => {
         try {
           const blob = await this._thumbs.run(async () => (await this._fetch(item.thumbnail_url, signal)).blob(), signal);
           if (gen !== this._gen) return;
           const url = URL.createObjectURL(blob); this._blobs.add(url);
-          const img = new Image(); img.src = url; img.alt = "";
-          cell.replaceChildren(img);
-        } catch (e) { if (e.name !== "AbortError") cell.textContent = "!"; } // no retry loop
+          item._thumb = url;
+          const img = new Image(); img.src = url; img.alt = ""; img.decoding = "async";
+          tile.classList.remove("load"); tile.prepend(img);
+        } catch (e) {
+          if (e.name !== "AbortError") { tile.classList.remove("load"); tile.classList.add("bad"); tile.textContent = "!"; }
+        } // no retry loop
       };
-      cell.addEventListener("click", () => this._openOriginal(item));
-      this._grid.appendChild(cell);
-      this._io.observe(cell);
-    }
+      tile.addEventListener("click", () => this._open(idx));
+      this._grid.appendChild(tile);
+      this._io.observe(tile);
+    });
   }
 
-  async _openOriginal(item) {
-    const dlg = this.shadowRoot.getElementById("dlg");
-    this._origCtl?.abort();
-    const ctl = this._origCtl = new AbortController();
-    try {
-      const blob = await this._originals.run(async () => (await this._fetch(item.original_url, ctl.signal)).blob(), ctl.signal);
-      if (ctl.signal.aborted) return;
-      this._origUrl = URL.createObjectURL(blob);
-      this.shadowRoot.getElementById("big").src = this._origUrl;
-      dlg.showModal();
-    } catch (e) { if (e.name !== "AbortError") this._setMsg("Could not load original.", true); }
+  /* ---------- viewer ---------- */
+  _open(idx) {
+    this.$("dlg").showModal();
+    this._show(idx, false);
   }
-  _closeOriginal() {
-    this._origCtl?.abort();
-    if (this._origUrl) URL.revokeObjectURL(this._origUrl);
-    this._origUrl = null;
-    this.shadowRoot.getElementById("big").removeAttribute("src");
+  async _step(d) {
+    const i = this._idx + d;
+    if (i >= this._items.length && !this._done) await this._more();
+    if (i < 0 || i >= this._items.length) return;
+    this._show(i, false);
+  }
+  async _show(idx, original) {
+    const item = this._items[idx];
+    if (!item) return;
+    this._idx = idx;
+    this._viewCtl?.abort();
+    const ctl = this._viewCtl = new AbortController();
+    this.$("c1").textContent = item.date ? `${this._label(item.date)}, ${this._dateText(item.date)}` : "Photo";
+    this.$("c2").textContent = `${this._time(item)} · ${idx + 1} / ${this._items.length}${this._done ? "" : "+"}`;
+    this.$("prev").disabled = idx === 0;
+    this.$("next").disabled = idx >= this._items.length - 1 && this._done;
+    this.$("orig").hidden = original;
+    const big = this.$("big");
+    if (item._thumb && !original) { big.src = item._thumb; big.className = "ph"; }
+    this.$("spin").hidden = false;
+    try {
+      const url = original ? item.original_url : item.preview_url;
+      const blob = await this._full.run(async () => (await this._fetch(url, ctl.signal)).blob(), ctl.signal);
+      if (ctl.signal.aborted) return;
+      if (this._viewUrl) URL.revokeObjectURL(this._viewUrl);
+      this._viewUrl = URL.createObjectURL(blob);
+      big.src = this._viewUrl; big.className = "";
+    } catch (e) {
+      if (e.name !== "AbortError") this.$("c2").textContent += " · could not load";
+    } finally { if (!ctl.signal.aborted) this.$("spin").hidden = true; }
+  }
+  _closeViewer() {
+    this._viewCtl?.abort();
+    if (this._viewUrl) URL.revokeObjectURL(this._viewUrl);
+    this._viewUrl = null;
+    this.$("big").removeAttribute("src");
   }
 }
 customElements.define("kata-album-card", KataAlbumCard);
 window.customCards = window.customCards || [];
-window.customCards.push({ type: "kata-album-card", name: "Kata Album", description: "Read-only Kata Friend photo timeline" });
+window.customCards.push({ type: "kata-album-card", name: "Kata Album", description: "Read-only Kata Friend photo gallery" });
