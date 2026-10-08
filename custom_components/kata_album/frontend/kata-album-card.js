@@ -1,4 +1,4 @@
-/* Kata Album card v0.3: read-only photo gallery. No external deps, no persistent image storage. */
+/* Kata Album card: read-only photo gallery. No external deps, no persistent image storage. */
 const MAX_THUMBS = 4;
 const LIST_TTL_MS = 10 * 60 * 1000;
 
@@ -360,6 +360,6 @@ class KataAlbumCard extends HTMLElement {
     this.$("big").removeAttribute("src");
   }
 }
-customElements.define("kata-album-card", KataAlbumCard);
+if (!customElements.get("kata-album-card")) customElements.define("kata-album-card", KataAlbumCard);
 window.customCards = window.customCards || [];
 window.customCards.push({ type: "kata-album-card", name: "Kata Album", description: "Read-only Kata Friend photo gallery" });

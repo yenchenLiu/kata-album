@@ -2,14 +2,18 @@
 
 Read-only, on-demand photo browser for Kata Friend. Photos stay on the device; nothing is written to disk.
 
-## Install (HA OS)
-1. Back up HA. 2. Copy `custom_components/kata_album` to `/config/custom_components/`.
-3. Copy `www/kata-album-card.js` to `/config/www/`. 4. Restart HA.
-5. Settings -> Devices -> Add integration -> Kata Album; paste the private export JSON.
-6. Dashboard resources: add `/local/kata-album-card.js` as a JavaScript module.
-7. Card: `type: custom:kata-album-card`, `entry_id: <config entry id>`, optional `title`, `min_tile` (160 px, responsive grid), `columns` (fixed column count; overrides `min_tile`), `page_size` (60), `days_per_load` (7, max 31), `max_days` (365).
-   The card is a date-grouped gallery: newest 7 days first, older windows load as you scroll; empty days are skipped. Click a photo for a lightbox (arrow keys / swipe; shows the 1600x1200 preview, "Original" loads the full PNG). The date picker jumps to a day.
-8. Delete any temporary copy of the export JSON from the HA host.
+## Install (HACS)
+1. HACS -> three-dot menu -> Custom repositories -> add this repo's URL, category **Integration**.
+2. Download **Kata Album**, then restart Home Assistant.
+3. Settings -> Devices & services -> Add integration -> Kata Album; paste the private export JSON.
+4. Add the card to a dashboard: `type: custom:kata-album-card`, `entry_id: <config entry id>`.
+   The card JS ships inside the integration and is loaded automatically (no `/config/www` copy, no manual dashboard resource).
+   Options: `title`, `min_tile` (160 px, responsive grid), `columns` (fixed count; overrides `min_tile`), `page_size` (60), `days_per_load` (7, max 31), `max_days` (365).
+   Newest 7 days load first; older windows load as you scroll; empty days are skipped. Click a photo for a lightbox (arrow keys / swipe; shows the 1600x1200 preview, "Original" loads the full PNG). The date picker jumps to a day.
+5. Delete any temporary copy of the export JSON from the HA host.
+Updates: HACS shows a new release; download it and restart HA. The card URL carries the integration version, so browsers fetch the new card automatically.
+
+Manual install also works: copy `custom_components/kata_album/` to `/config/custom_components/` and restart.
 
 ## Export format
 Schema 1 (browse only) or schema 2 (adds `initialization.notify` = `{type: mqtt, url: <callback topic>}`).

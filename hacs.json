@@ -1,1 +1,4 @@
-{"name": "Kata Album"}
+{
+  "name": "Kata Album",
+  "render_readme": true
+}
