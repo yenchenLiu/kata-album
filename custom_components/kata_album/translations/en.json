@@ -1,0 +1,15 @@
+{
+  "config": {
+    "step": {
+      "user": {"title": "Import Kata export", "description": "Paste the private JSON export (schema 1 or 2).", "data": {"export": "Export JSON"}},
+      "reauth_confirm": {"title": "Re-import login data", "description": "The refresh token is no longer valid. Paste a fresh export.", "data": {"export": "Export JSON"}}
+    },
+    "error": {"invalid_format": "Export JSON is invalid or incomplete.", "auth_failed": "Login was rejected.", "cannot_connect": "Cannot reach SwitchBot cloud or device.", "wrong_device": "Export is for a different device."},
+    "abort": {"already_configured": "This device is already configured.", "reauth_successful": "Login data updated."}
+  },
+  "entity": {
+    "sensor": {"status": {"name": "Album status", "state": {"healthy": "Healthy", "empty": "Empty", "recovering": "Recovering", "auth_required": "Re-login required", "error": "Error"}}},
+    "binary_sensor": {"healthy": {"name": "Album healthy"}},
+    "button": {"check": {"name": "Check now"}, "reopen": {"name": "Reopen local service"}}
+  }
+}
