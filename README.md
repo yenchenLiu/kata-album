@@ -7,12 +7,16 @@ Read-only, on-demand photo browser for Kata Friend. Photos stay on the device; n
 3. Copy `www/kata-album-card.js` to `/config/www/`. 4. Restart HA.
 5. Settings -> Devices -> Add integration -> Kata Album; paste the private export JSON.
 6. Dashboard resources: add `/local/kata-album-card.js` as a JavaScript module.
-7. Card: `type: custom:kata-album-card`, `entry_id: <config entry id>`, optional `title`, `columns`, `page_size`.
+7. Card: `type: custom:kata-album-card`, `entry_id: <config entry id>`, optional `title`, `columns` (3), `page_size` (50), `days_per_load` (30, max 31), `max_days` (365).
+   The card is a date-grouped timeline: newest 30 days first, older windows load as you scroll; empty days are skipped. The date picker jumps to a day.
 8. Delete any temporary copy of the export JSON from the HA host.
 
 ## Export format
 Schema 1 (browse only) or schema 2 (adds `initialization.notify` = `{type: mqtt, url: <callback topic>}`).
 Without the callback, browsing works but `1021` auto-recovery and the "Reopen local service" button are disabled.
+
+## API
+`GET /api/kata_album/<entry_id>/photos?start=YYYY-MM-DD&end=YYYY-MM-DD` (max 31 days, default last 30; `?date=` for one day), newest first, each item carries its local `date`. Thumbnails/originals: `.../photos/<id>/thumbnail|original`. Admin only.
 
 ## Security notes
 - Credentials live in the HA config entry (and therefore in HA backups, which HA does not encrypt by itself).

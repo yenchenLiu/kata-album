@@ -30,6 +30,7 @@ from .errors import AuthRejected, KataError, LocalError, NotConfigured
 from .local import KataLocalClient, limited_chunks
 
 _LOGGER = logging.getLogger(__name__)
+MAX_REGISTRY = 5000
 
 
 _ID_RE = re.compile(r"^photo/[0-9A-Za-z_-]+$")
@@ -70,7 +71,7 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
         self.local: KataLocalClient | None = None
         self._lock = asyncio.Lock()
         self._salt = secrets.token_hex(8)
-        self._photos: dict[str, dict] = {}
+        self._photos: dict[str, dict] = {}  # opaque id -> device paths, capped
         self._list_cache: dict[str, tuple[float, list[dict]]] = {}
         self.failures = 0
         self.last_recovery: datetime | None = None
@@ -100,32 +101,38 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
                 self.entry, data={**self.entry.data, CONF_LOCAL: info})
 
     # ---- photo listing ------------------------------------------------------
-    async def _fetch_day(self, day, use_cache: bool = True) -> list[dict]:
-        key = day.isoformat()
+    async def _fetch_range(self, first, last, use_cache: bool = True) -> list[dict]:
+        """List photos from local midnight of `first` to the end of `last` (inclusive)."""
+        key = f"{first.isoformat()}..{last.isoformat()}"
         hit = self._list_cache.get(key)
         if use_cache and hit and time.monotonic() - hit[0] < LIST_CACHE_SECONDS:
             return hit[1]
         if self.local is None:
             raise LocalError("no local service info")
-        start, end = day_bounds(day)
+        start, _ = day_bounds(first)
+        _, end = day_bounds(last)
         raw = await self.local.list_photos(start, end)
         items = []
         for it in raw:
             paths = _photo_paths(it)
             if not paths:
                 continue
-            ts = it.get("start_time") or 0  # milliseconds
-            ts = int(ts) // 1000
+            ts = int(it.get("start_time") or 0) // 1000  # device sends milliseconds
             pid = hashlib.sha256(f"{self._salt}{it['path']}".encode()).hexdigest()[:20]
+            self._photos.pop(pid, None)  # re-insert so recently listed ids stay newest
             self._photos[pid] = {"thumb": paths[0], "original": paths[1]}
             items.append({"id": pid, "ts": ts})
-        items.sort(key=lambda i: i["ts"])
+        while len(self._photos) > MAX_REGISTRY:
+            self._photos.pop(next(iter(self._photos)))
+        items.sort(key=lambda i: i["ts"], reverse=True)  # newest first
+        if len(self._list_cache) > 32:
+            self._list_cache.clear()
         self._list_cache[key] = (time.monotonic(), items)
         return items
 
-    async def list_day(self, day) -> list[dict]:
+    async def list_range(self, first, last) -> list[dict]:
         async with self._lock:
-            return await self._fetch_day(day)
+            return await self._fetch_range(first, last)
 
     def photo_path(self, photo_id: str, kind: str) -> str | None:
         p = self._photos.get(photo_id)
@@ -136,7 +143,8 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
         if self.local is None:
             await self._refresh_local_info()
         await self.local.heartbeat()  # type: ignore[union-attr]
-        items = await self._fetch_day(dt_util.now().date(), use_cache=False)
+        today = dt_util.now().date()
+        items = await self._fetch_range(today, today, use_cache=False)
         await self._maybe_probe_thumb(items)
         return len(items)
 
@@ -145,7 +153,7 @@ class KataCoordinator(DataUpdateCoordinator[dict]):
         if not items or (self._last_probe and now - self._last_probe < THUMB_PROBE_INTERVAL):
             return
         self._last_probe = now
-        path = self._photos[items[-1]["id"]]["thumb"]
+        path = self._photos[items[0]["id"]]["thumb"]  # newest
         resp = await self.local.open_image(path)  # type: ignore[union-attr]
         try:
             async for _ in limited_chunks(resp, MAX_THUMB_BYTES):

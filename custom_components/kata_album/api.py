@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -15,6 +15,8 @@ from .local import limited_chunks
 
 _LOGGER = logging.getLogger(__name__)
 _FLAG = "_kata_views"
+DEFAULT_RANGE_DAYS = 30
+MAX_RANGE_DAYS = 31
 _IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 
 
@@ -46,27 +48,41 @@ class PhotosView(HomeAssistantView):
 
     async def get(self, request: web.Request, entry_id: str):
         c = _coordinator(self.hass, request, entry_id)
+        q = request.query
+        today = dt_util.now().date()
         try:
-            day = date.fromisoformat(request.query.get("date", dt_util.now().date().isoformat()))
+            if "date" in q:
+                first = last = date.fromisoformat(q["date"])
+            else:
+                last = date.fromisoformat(q["end"]) if "end" in q else today
+                first = (date.fromisoformat(q["start"]) if "start" in q
+                         else last - timedelta(days=DEFAULT_RANGE_DAYS - 1))
         except ValueError:
             return self.json({"status": "bad_date"}, status_code=400)
+        if first > last or (last - first).days + 1 > MAX_RANGE_DAYS:
+            return self.json({"status": "bad_range"}, status_code=400)
         try:
-            items = await c.list_day(day)
+            items = await c.list_range(first, last)
         except KataError as err:
             _LOGGER.debug("list failed: %s", err)
-            return self.json({"date": day.isoformat(), "status": c.state, "items": []},
-                             status_code=502)
+            return self.json({"start": first.isoformat(), "end": last.isoformat(),
+                              "status": c.state, "items": []}, status_code=502)
+        tz = dt_util.get_default_time_zone()
         base = f"/api/kata_album/{entry_id}/photos"
-        out = [{
-            "id": i["id"],
-            "captured_at": dt_util.utc_from_timestamp(i["ts"]).astimezone(
-                dt_util.get_default_time_zone()).isoformat() if i["ts"] else None,
-            "thumbnail_url": f"{base}/{i['id']}/thumbnail",
-            "original_url": f"{base}/{i['id']}/original",
-        } for i in items]
-        return self.json({"date": day.isoformat(),
-                          "status": "ready" if out else "empty", "items": out},
-                         headers={"Cache-Control": "no-store"})
+        out = []
+        for i in items:
+            when = dt_util.utc_from_timestamp(i["ts"]).astimezone(tz) if i["ts"] else None
+            out.append({
+                "id": i["id"],
+                "date": when.date().isoformat() if when else None,
+                "captured_at": when.isoformat() if when else None,
+                "thumbnail_url": f"{base}/{i['id']}/thumbnail",
+                "original_url": f"{base}/{i['id']}/original",
+            })
+        return self.json(
+            {"start": first.isoformat(), "end": last.isoformat(),
+             "status": "ready" if out else "empty", "items": out},
+            headers={"Cache-Control": "no-store"})
 
 
 class ImageView(HomeAssistantView):
