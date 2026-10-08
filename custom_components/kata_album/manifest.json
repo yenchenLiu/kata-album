@@ -2,17 +2,17 @@
   "domain": "kata_album",
   "name": "Kata Album",
   "codeowners": [
-    "@YenchenLiu"
+    "@yenchenLiu"
   ],
   "config_flow": true,
   "dependencies": [
     "http",
     "frontend"
   ],
-  "documentation": "https://github.com/YenchenLiu/kata-album",
+  "documentation": "https://github.com/yenchenLiu/kata-album",
   "integration_type": "device",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/YenchenLiu/kata-album/issues",
+  "issue_tracker": "https://github.com/yenchenLiu/kata-album/issues",
   "requirements": [],
   "version": "0.4.0"
 }
